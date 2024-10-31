@@ -1,0 +1,74 @@
+name: Deploy to DigitalOcean Droplet
+
+on:
+  push:
+    branches:
+      - main
+      - test
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: "14"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test
+
+      - name: Debug Secrets
+        run: |
+          echo "DROPLET_IP is set: ${{ secrets.DROPLET_IP != '' }}"
+          echo "DROPLET_USER is set: ${{ secrets.DROPLET_USER != '' }}"
+          echo "DROPLET_PASSWORD is set: ${{ secrets.DROPLET_PASSWORD != '' }}"
+
+      - name: Deploy to DigitalOcean Droplet
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.DROPLET_IP }}
+          username: ${{ secrets.DROPLET_USER }}
+          password: ${{ secrets.DROPLET_PASSWORD }}
+          script: |
+            echo "Connected to Droplet"
+            # Create app directory if it doesn't exist
+            mkdir -p ~/myco-rewards-indexer
+            cd ~/myco-rewards-indexer
+
+            # Initialize git repository if it doesn't exist
+            if [ ! -d .git ]; then
+              git init
+              git remote add origin https://github.com/SweetmanTech/myco-rewards-indexer.git
+            fi
+
+            # Fetch latest code and handle local changes
+            git fetch --all
+            git checkout -B ${{ github.ref_name }} origin/${{ github.ref_name }}
+            git reset HEAD --hard
+            git pull origin ${{ github.ref_name }}
+
+            echo "Current branch:"
+            git branch --show-current
+            echo "Git status:"
+            git status
+
+            # Ensure correct Node.js version
+            source ~/.nvm/nvm.sh
+            nvm use 20
+
+            # Install dependencies
+            npm install
+
+            # Start or restart the app using PM2
+            if pm2 list | grep -q "myco-rewards-indexer"; then
+              pm2 restart myco-rewards-indexer --update-env --cwd ~/myco-rewards-indexer
+            else
+              pm2 start npm --name "myco-rewards-indexer" --cwd ~/myco-rewards-indexer -- run start
+            fi
