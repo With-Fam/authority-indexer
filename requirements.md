@@ -64,6 +64,66 @@ The subscription indexing system monitors ERC721 Transfer events emitted during 
 
 #### 3.4.2 Technical Implementation
 
+The indexer will monitor Transfer events using the following approach:
+
+1. Event Monitoring
+
+   - Use eth_getLogs RPC method to fetch Transfer events
+   - Monitor events from the Hypersub NFT contract address
+   - Track the Transfer event signature: `Transfer(address,address,uint256)`
+
+2. Event Processing
+
+   - For each Transfer event:
+     - If `from` is zero address (0x0): Handle as new subscription mint
+     - If `to` is zero address (0x0): Handle as subscription burn/expiration
+     - Otherwise: Handle as subscription transfer between addresses
+
+3. Implementation Details
+
+```javascript
+// Event signature for Transfer
+const TRANSFER_EVENT = "Transfer(address,address,uint256)";
+// Fetch logs using rpcRequest utility
+const logs = await rpcRequest("base", "eth_getLogs", [
+  {
+    topics: [ethers.utils.id(TRANSFER_EVENT)],
+    fromBlock: LAST_PROCESSED_BLOCK,
+    toBlock: "latest",
+  },
+]);
+// Process each Transfer event
+for (const log of logs) {
+  const [from, to, tokenId] = ethers.utils.defaultAbiCoder.decode(
+    ["address", "address", "uint256"],
+    log.data
+  );
+  if (from === "0x0") {
+    // New subscription minted
+    await handleNewSubscription(to, tokenId);
+  } else if (to === "0x0") {
+    // Subscription expired/burned
+    await handleExpiredSubscription(from, tokenId);
+  } else {
+    // Subscription transferred
+    await handleTransferredSubscription(from, to, tokenId);
+  }
+}
+```
+
+4. Error Handling
+
+   - Implement exponential backoff for RPC failures
+   - Cache successful responses to minimize RPC calls
+   - Track failed transactions for retry
+   - Log all errors for monitoring
+
+5. Block Management
+   - Track last processed block number
+   - Handle chain reorganizations
+   - Process blocks in batches for efficiency
+   - Maintain safe confirmation depth
+
 ## 4. Implementation Roadmap
 
 ### 4.1 Documentation and Setup
@@ -75,6 +135,142 @@ The subscription indexing system monitors ERC721 Transfer events emitted during 
 5. Document all core functionality and methods.
 
 ### 4.2 Join Fam
+
+#### 4.2.1 Implementation Steps
+
+1. Create Event Monitoring Service
+
+   - Update event signature to monitor ERC721 Transfer events
+   - Configure Base network RPC endpoints
+
+2. Fetch Transfer Logs
+
+```javascript
+import rpcRequest from "../rpcRequest.js";
+import { parseEventLogs } from "viem";
+
+const TRANSFER_EVENT = "Transfer(address,address,uint256)";
+
+async function fetchTransferLogs(fromBlock, toBlock) {
+  try {
+    const logs = await rpcRequest("base", "eth_getLogs", [
+      {
+        topics: [ethers.utils.id(TRANSFER_EVENT)],
+        fromBlock: fromBlock.toString(16), // Convert to hex
+        toBlock: toBlock.toString(16), // Convert to hex
+        address: process.env.HYPERSUB_CONTRACT_ADDRESS, // Add contract address
+      },
+    ]);
+
+    return logs;
+  } catch (error) {
+    console.error("Error fetching transfer logs:", error);
+    throw error;
+  }
+}
+
+export default fetchTransferLogs;
+```
+
+3. Implement Transfer Event Processing
+
+```javascript
+// Event signature for Transfer
+const TRANSFER_EVENT = "Transfer(address,address,uint256)";
+
+const handleNewSubscription = async (to, tokenId) => {
+  try {
+    // Call ManageFamAuthority contract
+    await manageFamAuthority.addPartyCards(to, [tokenId]);
+    console.log(`Added party cards for ${to} with token ${tokenId}`);
+  } catch (error) {
+    console.error(`Failed to add party cards: ${error}`);
+    // Implement retry mechanism
+  }
+};
+```
+
+4. Process Transfer Logs
+
+```javascript
+import { parseEventLogs } from "viem";
+import getTransferLog from "./viem/getTransferLog.js";
+
+async function processTransferLogs(logs) {
+  try {
+    for (const log of logs) {
+      const transferLog = getTransferLog([log]);
+      const { collector: to, tokenId, collectionAddress } = transferLog;
+
+      // Get the 'from' address from the original log topics
+      const from = log.topics[1]; // First indexed parameter is 'from'
+
+      if (from === "0x0000000000000000000000000000000000000000") {
+        // New subscription minted
+        await handleNewSubscription(to, tokenId);
+      } else if (to === "0x0000000000000000000000000000000000000000") {
+        // Subscription expired/burned
+        await handleExpiredSubscription(from, tokenId);
+      } else {
+        // Subscription transferred
+        await handleTransferredSubscription(from, to, tokenId);
+      }
+
+      console.log(`Processed transfer event in block ${log.blockNumber}`);
+    }
+  } catch (error) {
+    console.error("Error processing transfer logs:", error);
+    throw error;
+  }
+}
+
+export default processTransferLogs;
+```
+
+5. Implement Block Management
+
+```javascript
+const processBlocks = async () => {
+  const currentBlock = await rpcRequest("base", "eth_blockNumber", []);
+  const fromBlock = LAST_PROCESSED_BLOCK;
+  const toBlock = Math.min(
+    BigInt(currentBlock),
+    LAST_PROCESSED_BLOCK + BATCH_SIZE
+  );
+
+  // Fetch and process logs
+  const logs = await fetchTransferLogs(fromBlock, toBlock);
+  await processTransferLogs(logs);
+
+  // Update last processed block
+  LAST_PROCESSED_BLOCK = toBlock;
+};
+```
+
+#### 4.2.2 Integration Points
+
+1. Hypersub Contract
+
+   - Monitor Transfer events from subscription NFT contract
+   - Track subscription status changes
+
+2. ManageFamAuthority Contract
+
+   - Execute addPartyCards function
+   - Handle transaction confirmations
+   - Manage gas fees and transaction priorities
+
+3. Party Protocol
+   - Verify successful membership updates
+   - Monitor membership status changes
+
+#### 4.2.3 Success Criteria
+
+- Successfully detect new subscription mints
+- Properly execute addPartyCards transactions
+- Handle errors and retries effectively
+- Maintain accurate membership status
+- Process events within 5-second target window
 
 ### 4.3 Leave Fam
 
